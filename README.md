@@ -1,102 +1,612 @@
-India Air Quality ETL Pipeline
+# India Air Quality ETL Pipeline
 
-A local, Dockerized ETL pipeline that extracts real-time Air Quality Index (AQI) readings from the data.gov.in API, cleans and transforms the data, and loads it into PostgreSQL — orchestrated daily by Apache Airflow.
+A production-style, Dockerized ETL pipeline that extracts real-time Air Quality Index (AQI) data from the Government of India's **data.gov.in API**, performs data cleaning and transformation, and loads it into PostgreSQL.
 
-Problem Statement
+The pipeline is orchestrated daily using **Apache Airflow**, making the dataset continuously updated and analysis-ready.
 
-Air quality monitoring in India is fragmented across thousands of stations reporting in real time, but the raw API data isn't analysis-ready — it needs deduplication, type correction, and reshaping before it's useful. This pipeline automates that process, producing a clean, queryable dataset that could support use cases like identifying which states/cities show the most volatile pollutant levels, useful for public health monitoring or policy prioritization.
+---
 
-Architecture
+# Project Overview
 
-data.gov.in API (paginated)
+Air quality data in India is collected from thousands of monitoring stations across the country. Although this information is publicly available through the CPCB API, the raw API response is not directly suitable for analytics because it contains:
+
+- No primary key
+- Numeric values stored as strings
+- Duplicate records across pipeline runs
+- Paginated API responses
+- Live data that continuously changes
+
+This project automates the complete ETL workflow and produces a clean PostgreSQL table that can be queried for analytics or connected to BI dashboards.
+
+---
+
+# Features
+
+- Daily scheduled ETL using Apache Airflow
+- Extracts live AQI data from data.gov.in
+- Handles paginated API responses
+- Archives every raw API response
+- Cleans and validates incoming data
+- Converts incorrect data types
+- Removes duplicates
+- Generates composite primary keys
+- Loads data into PostgreSQL using idempotent upserts
+- Fully Dockerized
+- Retry mechanism with exponential backoff
+- Separation of orchestration and analytics databases
+
+---
+
+# Architecture
+
+```text
+                    +----------------------+
+                    | data.gov.in API      |
+                    | (Real-time AQI Data) |
+                    +----------+-----------+
+                               |
+                               |
+                               ▼
+                     Extract Task (Airflow)
+                               |
+                               ▼
+          Save Raw JSON (/data/raw/run_timestamp/)
+                               |
+                               ▼
+                   Transform Task (Python)
+         - Flatten nested records
+         - Type conversion
+         - Deduplication
+         - Composite key generation
+                               |
+                               ▼
+       Save Clean CSV (/data/processed/)
+                               |
+                               ▼
+                    Load Task (PostgreSQL)
+       INSERT ... ON CONFLICT DO UPDATE
+                               |
+                               ▼
+              analytics-db (PostgreSQL)
+          air_quality_readings table
+```
+
+---
+
+# Project Structure
+
+```text
+india_air_quality_etl/
+
 │
-▼
-extract*task ── writes raw JSON per page to /data/raw/run*{timestamp}/
+├── dags/
+│   └── india_air_quality_etl.py
 │
-▼
-transform_task ── flattens, casts types, dedupes, builds composite key
-│ writes cleaned CSV to /data/processed/
-▼
-load_task ── upserts into PostgreSQL (ON CONFLICT DO UPDATE)
+├── scripts/
+│   ├── extract.py
+│   ├── transform.py
+│   ├── load.py
+│   └── utils.py
 │
-▼
-analytics-db (Postgres) ── air_quality_readings table
+├── data/
+│   ├── raw/
+│   └── processed/
+│
+├── sql/
+│   └── schema.sql
+│
+├── docker-compose.yml
+├── Dockerfile
+├── requirements.txt
+├── .env.example
+└── README.md
+```
 
-Orchestrated by an Airflow DAG (india_air_quality_etl), scheduled daily, running entirely inside Docker containers alongside two isolated Postgres instances:
+---
 
-airflow-db — Airflow's own metadata/scheduling database
-analytics-db — the target database holding the actual AQI data
+# Data Source
 
-Keeping these separate mirrors real-world production setups, where orchestration metadata and analytical targets shouldn't share infrastructure — a schema change or backup/restore on one shouldn't risk the other.
+**Provider**
 
-Data Source
+Central Pollution Control Board (CPCB)
 
-API: Real-time Air Quality Index from various locations — Central Pollution Control Board (CPCB), via data.gov.in
-Why this source: Unlike a static Kaggle CSV, this is a live government API with continuously updating readings from ~3,500+ monitoring records across India, which makes the pipeline genuinely useful to re-run on a schedule rather than a one-off exercise.
+**API**
 
-Fields returned per record: country, state, city, station, last_update, latitude, longitude, pollutant_id, min_value, max_value, avg_value
+Real-time Air Quality Index API provided through **data.gov.in**
 
-Setup & Run Instructions
+The API contains approximately **3,500+ monitoring records** collected from monitoring stations across India.
 
-Prerequisites
+Each record contains:
 
-Docker Desktop installed and running
-A free API key from data.gov.in (register at data.gov.in, then open the AQI dataset's "Data API" page to get your key)
+| Field |
+|--------|
+| country |
+| state |
+| city |
+| station |
+| pollutant_id |
+| last_update |
+| latitude |
+| longitude |
+| min_value |
+| max_value |
+| avg_value |
 
-Steps
+---
 
-Clone this repo and navigate into the project folder:
+# Tech Stack
 
-bash cd india_air_quality_etl
+- Python
+- Apache Airflow
+- PostgreSQL
+- Docker
+- Docker Compose
+- pandas
+- requests
 
-Copy the environment template and fill in your credentials:
+---
 
-bash cp .env.example .env
+# ETL Workflow
 
-Edit .env and set:
+## 1. Extract
 
-API_KEY=your_data_gov_in_key
-POSTGRES_USER=...
-POSTGRES_PASSWORD=...
+- Connects to the data.gov.in API
+- Fetches every page of results
+- Retries failed requests using exponential backoff
+- Saves raw JSON files for auditing
+
+Output:
+
+```
+data/raw/run_2026-07-03/
+    page_1.json
+    page_2.json
+    ...
+```
+
+---
+
+## 2. Transform
+
+The transformation stage performs:
+
+- Flatten JSON
+- Convert numeric strings into numeric types
+- Remove duplicates
+- Generate composite primary keys
+- Validate missing values
+- Log invalid records
+- Export cleaned CSV
+
+Output:
+
+```
+data/processed/air_quality_clean.csv
+```
+
+---
+
+## 3. Load
+
+Loads the cleaned dataset into PostgreSQL.
+
+Uses
+
+```sql
+INSERT ...
+ON CONFLICT (...)
+DO UPDATE
+```
+
+This ensures:
+
+- No duplicate records
+- Safe re-runs
+- Idempotent pipeline execution
+- Updated readings replace older values
+
+---
+
+# Database Design
+
+## Table
+
+```
+air_quality_readings
+```
+
+Columns include
+
+- station
+- state
+- city
+- pollutant_id
+- last_update
+- latitude
+- longitude
+- min_value
+- max_value
+- avg_value
+
+Primary Key
+
+```
+station
++
+pollutant_id
++
+last_update
+```
+
+---
+
+# Airflow
+
+DAG Name
+
+```
+india_air_quality_etl
+```
+
+Schedule
+
+```
+Daily
+```
+
+Pipeline Tasks
+
+```text
+extract_task
+      │
+      ▼
+transform_task
+      │
+      ▼
+load_task
+```
+
+---
+
+# Why Two PostgreSQL Databases?
+
+The project intentionally uses two isolated PostgreSQL instances.
+
+## airflow-db
+
+Stores
+
+- DAG metadata
+- Scheduler state
+- Task history
+- Logs
+
+## analytics-db
+
+Stores
+
+- Air Quality dataset
+- Clean analytical tables
+
+Keeping them separate reflects production best practices where orchestration metadata should never share infrastructure with analytical data.
+
+---
+
+# Data Quality Challenges
+
+## 1. Numeric values returned as strings
+
+Example
+
+```json
+"avg_value": "36"
+```
+
+Solution
+
+- Explicit type conversion
+- Invalid values logged
+- Failed conversions counted
+
+---
+
+## 2. No unique identifier
+
+The API provides no primary key.
+
+Solution
+
+Generated composite key using
+
+```
+station
++
+pollutant_id
++
+last_update
+```
+
+---
+
+## 3. One row per pollutant
+
+Each station appears multiple times because every pollutant has its own record.
+
+Example
+
+```
+Station A
+    PM2.5
+
+Station A
+    PM10
+
+Station A
+    NO2
+```
+
+The composite key was designed accordingly.
+
+---
+
+## 4. Live data changes every run
+
+Since the API is real-time,
+
+record counts vary between executions.
+
+Example
+
+```
+3304 rows
+```
+
+Later
+
+```
+3337 rows
+```
+
+This is expected behavior rather than a pipeline issue.
+
+---
+
+## 5. Airflow log retrieval issue
+
+Problem
+
+```
+403 Forbidden
+```
+
+Cause
+
+Different Airflow services generated different `secret_key` values.
+
+Solution
+
+Configured a shared
+
+```
+AIRFLOW__WEBSERVER__SECRET_KEY
+```
+
+across every Airflow container.
+
+---
+
+# Design Decisions
+
+## Raw Data Archival
+
+Every API response is stored before transformation.
+
+Benefits
+
+- Auditability
+- Reprocessing
+- Debugging
+- Reproducibility
+
+---
+
+## Idempotent Loading
+
+Instead of deleting and reloading data,
+
+the project uses PostgreSQL upserts.
+
+Benefits
+
+- No duplicates
+- Safe retries
+- Faster incremental updates
+
+---
+
+## Retry Logic
+
+Extraction retries failed requests with exponential backoff.
+
+Benefits
+
+- Handles temporary outages
+- Handles API rate limiting
+- Prevents unnecessary DAG failures
+
+---
+
+## Containerized Infrastructure
+
+Everything runs inside Docker.
+
+Services include
+
+- Airflow Webserver
+- Airflow Scheduler
+- Airflow Worker
+- airflow-db
+- analytics-db
+
+This provides reproducible environments across machines.
+
+---
+
+# Setup
+
+## Prerequisites
+
+- Docker Desktop
+- Docker Compose
+- data.gov.in API Key
+
+---
+
+## Clone Repository
+
+```bash
+git clone https://github.com/your-username/india_air_quality_etl.git
+
+cd india_air_quality_etl
+```
+
+---
+
+## Configure Environment
+
+```bash
+cp .env.example .env
+```
+
+Update
+
+```text
+API_KEY=YOUR_API_KEY
+
+POSTGRES_USER=postgres
+
+POSTGRES_PASSWORD=password
+
 POSTGRES_DB=air_quality
-AIRFLOW**WEBSERVER**SECRET_KEY=your_generated_secret_key
 
-Generate a secret key with:
+AIRFLOW__WEBSERVER__SECRET_KEY=YOUR_SECRET_KEY
+```
 
-bash python3 -c "import secrets; print(secrets.token_hex(16))"
+Generate a secret key
 
-Build and start all containers:
+```bash
+python -c "import secrets; print(secrets.token_hex(16))"
+```
 
-bash docker compose up --build
+---
 
-Open the Airflow UI at http://localhost:8080 and trigger the india_air_quality_etl DAG manually (or wait for the daily schedule).
-Verify data landed correctly:
+## Start the Project
 
-bash docker exec -it <analytics-db-container> psql -U <user> -d air_quality
-SELECT COUNT(\*) FROM air_quality_readings;
+```bash
+docker compose up --build
+```
 
-Data Quality Issues Found and How I Handled Them
+---
 
-Numeric fields returned as strings. The API returns latitude, longitude, min_value, max_value, and avg_value as strings (e.g., "6" instead of 6). Handled with explicit type casting in transform.py, with invalid/non-numeric values counted and logged rather than silently dropped.
-No unique identifier per row. Each row represents one pollutant reading for one station at one timestamp, but the API provides no primary key. Built a composite key from station + pollutant_id + last_update to support safe deduplication and idempotent upserts.
-One row per pollutant, not per station. A single station appears in multiple rows — one per pollutant type (PM2.5, PM10, NO2, SO2, CO, NH3) — rather than one row with all pollutants as columns. This shaped how the composite key and downstream queries needed to work.
-Live data creates run-to-run variance. Because this is a real-time feed, the exact record count differs slightly between pipeline runs (e.g., one run captured 3,300 records, another 3,337) as monitoring stations report new readings or go offline. This isn't a pipeline bug — it's expected behavior for a live dataset, and it's the reason the load step uses an upsert pattern rather than a full overwrite.
-Airflow log retrieval failure (403 Forbidden). Encountered a 403 error when trying to view task logs in the UI, caused by the webserver and scheduler containers each generating a different random secret_key. Fixed by setting a single shared AIRFLOW**WEBSERVER**SECRET_KEY across all Airflow services in .env and docker-compose.yml.
+## Open Airflow
 
-Design Decisions
+```
+http://localhost:8080
+```
 
-Upsert over full overwrite: Used INSERT ... ON CONFLICT (composite*key) DO UPDATE so re-running the DAG never creates duplicates, and existing readings get refreshed rather than duplicated — important given the live-data variance noted above.
-Raw data archival before transformation: Every raw API page is saved to /data/raw/run*{timestamp}/ before any cleaning happens. This keeps the pipeline auditable — if a transformation bug is ever found, the original data is still there to reprocess.
-Two isolated Postgres instances: Airflow's metadata database and the analytics target database are kept fully separate, reflecting standard production practice of not mixing orchestration state with analytical data.
-Retry with exponential backoff on extraction: The API is called with up to 3 retries and backoff to handle transient failures or rate limiting without failing the whole pipeline run.
+Trigger
 
-What I'd Improve With More Time
+```
+india_air_quality_etl
+```
 
-Add a lightweight dashboard (Streamlit or Metabase) on top of analytics-db to visualize state/city-level AQI trends over time
-Add automated data quality tests (e.g., Great Expectations) to formally assert schema and value-range expectations on every run, instead of relying on manual log review
-Add real alerting (Slack/email) on DAG failure, beyond the current console/log-based failure callback
-Historize readings properly (e.g., a is_current flag or SCD pattern) so trend analysis over time is possible, since the current upsert model only keeps the latest value per composite key
+---
 
-Tech Stack
+# Verify Data
 
-Python · Apache Airflow · PostgreSQL · Docker & Docker Compose · pandas · requests
+Connect to PostgreSQL
+
+```bash
+docker exec -it analytics-db psql \
+-U postgres \
+-d air_quality
+```
+
+Example query
+
+```sql
+SELECT COUNT(*)
+FROM air_quality_readings;
+```
+
+---
+
+# Example Analytical Queries
+
+Top 10 cities with highest AQI
+
+```sql
+SELECT city,
+AVG(avg_value) AS average_aqi
+FROM air_quality_readings
+GROUP BY city
+ORDER BY average_aqi DESC
+LIMIT 10;
+```
+
+Most monitored pollutants
+
+```sql
+SELECT pollutant_id,
+COUNT(*)
+FROM air_quality_readings
+GROUP BY pollutant_id;
+```
+
+States with the largest number of monitoring stations
+
+```sql
+SELECT state,
+COUNT(DISTINCT station)
+FROM air_quality_readings
+GROUP BY state
+ORDER BY COUNT(*) DESC;
+```
+
+---
+
+# Future Improvements
+
+- Streamlit dashboard
+- Metabase integration
+- Great Expectations data validation
+- Slack and Email alerts
+- Historical versioning (Slowly Changing Dimensions)
+- Incremental loading
+- Data warehouse star schema
+- CI/CD with GitHub Actions
+- Unit and integration tests
+
+---
+
+# Skills Demonstrated
+
+- ETL Pipeline Development
+- Data Engineering
+- Apache Airflow
+- PostgreSQL
+- Docker
+- Data Cleaning
+- Data Validation
+- API Integration
+- Incremental Loading
+- SQL
+- Python
+- Workflow Orchestration
+- Production Data Pipeline Design
+
+---
+
+# License
+
+This project is intended for educational and portfolio purposes.
