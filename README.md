@@ -85,8 +85,7 @@ india_air_quality_etl/
 ├── scripts/
 │   ├── extract.py
 │   ├── transform.py
-│   ├── load.py
-│   └── utils.py
+│   └── load.py
 │
 ├── data/
 │   ├── raw/
@@ -99,7 +98,9 @@ india_air_quality_etl/
 ├── Dockerfile
 ├── requirements.txt
 ├── .env.example
+├── .gitignore
 └── README.md
+
 ```
 
 ---
